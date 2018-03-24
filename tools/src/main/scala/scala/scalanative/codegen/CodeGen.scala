@@ -4,6 +4,7 @@ package codegen
 import java.{lang => jl}
 import java.nio.ByteBuffer
 import java.nio.file.Paths
+import java.io.File
 import scala.annotation.tailrec
 import scala.collection.mutable
 import scala.collection.mutable.ListBuffer
@@ -901,7 +902,7 @@ object CodeGen {
 
     override def genAdditionalInfo(): Unit = {
       str("\n")
-      str(ImplDebug.debuggerMetadata("Test.scala", "/home/lk/projects/cloned/scala-native/sandbox/"))
+      str(ImplDebug.debuggerMetadata("Test.scala", s"${new File("").getAbsolutePath}/sandbox/"))
       functionDebugInfos.foreach(genFunctionMetadata)
     }
 
