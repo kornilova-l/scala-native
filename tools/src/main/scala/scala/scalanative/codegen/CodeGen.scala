@@ -6,6 +6,7 @@ import java.nio.ByteBuffer
 import java.nio.file.Paths
 import scala.annotation.tailrec
 import scala.collection.mutable
+import scala.collection.mutable.ListBuffer
 import scalanative.util.{Scope, ShowBuilder, unsupported}
 import scalanative.io.{VirtualDirectory, withScratchBuffer}
 import scalanative.optimizer.analysis.ControlFlow.{Graph => CFG, Block, Edge}
@@ -40,7 +41,7 @@ object CodeGen {
           case (k, defns) =>
             val sorted = defns.sortBy(_.name.show)
             val impl =
-              new Impl(config.targetTriple, env, sorted, workdir)
+              new ImplDebug(config.targetTriple, env, sorted, workdir)
             val outpath = k + ".ll"
             val buffer  = impl.gen()
             buffer.flip
@@ -62,7 +63,7 @@ object CodeGen {
       }
     }
 
-  private final class Impl(targetTriple: String,
+  private class Impl(targetTriple: String,
                            env: Map[Global, Defn],
                            defns: Seq[Defn],
                            workdir: VirtualDirectory) {
@@ -79,15 +80,21 @@ object CodeGen {
     def gen(): ByteBuffer = {
       genDefns(defns)
       val body = builder.toString.getBytes("UTF-8")
-      builder.clear
+      builder.clear()
       genPrelude()
       genConsts()
       genDeps()
       val prelude = builder.toString.getBytes("UTF-8")
-      val buffer  = ByteBuffer.allocate(prelude.length + body.length)
+      builder.clear()
+      genAdditionalInfo() // debugging implementation generates debugging metadata
+      val additionalInfo = builder.toString.getBytes("UTF-8")
+      val buffer  = ByteBuffer.allocate(prelude.length + body.length + additionalInfo.length)
       buffer.put(prelude)
       buffer.put(body)
+      buffer.put(additionalInfo)
     }
+
+    def genAdditionalInfo(): Unit = {}
 
     def genDeps() = deps.foreach { n =>
       val nn = n.normalize
@@ -223,6 +230,8 @@ object CodeGen {
       }
     }
 
+    def genMetadataBeforeFunctionDefinition(name: Global): Unit = {}
+
     def genFunctionDefn(attrs: Attrs,
                         name: Global,
                         sig: Type,
@@ -255,6 +264,7 @@ object CodeGen {
         str(gxxpersonality)
       }
       if (!isDecl) {
+        genMetadataBeforeFunctionDefinition(name)
         str(" {")
         val cfg = CFG(insts)
         cfg.foreach { block =>
@@ -864,6 +874,61 @@ object CodeGen {
       str(attr.show)
   }
 
+  /**
+    * Generates llvm code with debug information for
+    * main_scala.scalanative.runtime.ObjectArray_unit function
+    */
+  private class ImplDebug(targetTriple: String,
+                     env: Map[Global, Defn],
+                     defns: Seq[Defn],
+                     workdir: VirtualDirectory) extends Impl(targetTriple, env, defns, workdir) {
+
+    import builder._
+
+    /**
+      * This list is updated when function definition is generated.
+      * It is used to generate debugger metadata
+      *
+      * Currently this list can contain only 0 or 1 element,
+      * because debug information is added for only one function
+      */
+    private val functionDebugInfos = new ListBuffer[FunctionDebugInfo]()
+    /**
+      * This value is set to true when generator finds main_scala.scalanative.runtime.ObjectArray_unit method
+      * it is used to add location info to one instruction inside function block
+      */
+    private var genLocation = false
+
+    override def genAdditionalInfo(): Unit = {
+      str("\n")
+      str(ImplDebug.debuggerMetadata("Test.scala", "/home/lk/projects/cloned/scala-native/sandbox/"))
+      functionDebugInfos.foreach(genFunctionMetadata)
+    }
+
+    def genFunctionMetadata(functionDebugInfo: FunctionDebugInfo): Unit = {
+      str(diSubprogram(functionDebugInfo))
+    }
+
+    override def genMetadataBeforeFunctionDefinition(name: Global): Unit = {
+      if (name.id == "main_scala.scalanative.runtime.ObjectArray_unit") {
+        val id = 7
+        str(s" !dbg !$id")
+        functionDebugInfos += FunctionDebugInfo(name.top.id + "::" + name.id, 2, id)
+        genLocation = true
+      }
+    }
+
+    override def genBlock(block: Block)(implicit cfg: CFG, fresh: Fresh): Unit = {
+      super.genBlock(block)
+      if (genLocation) {
+        str(", !dbg !8") // location info
+        genLocation = false
+      }
+    }
+  }
+
+  case class FunctionDebugInfo(name: String, line: Int, id: Int)
+
   private object Impl {
     val gxxpersonality =
       "personality i8* bitcast (i32 (...)* @__gxx_personality_v0 to i8*)"
@@ -873,4 +938,27 @@ object CodeGen {
     val typeid =
       "call i32 @llvm.eh.typeid.for(i8* bitcast ({ i8*, i8*, i8* }* @_ZTIN11scalanative16ExceptionWrapperE to i8*))"
   }
+
+  private object ImplDebug {
+    private def debuggerMetadata(fileName: String, directory: String) =
+      s"""
+        |!llvm.dbg.cu = !{!0}
+        |!llvm.module.flags = !{!3, !4}
+        |!llvm.ident = !{!5}
+        |
+        |!0 = distinct !DICompileUnit(language: DW_LANG_C99, file: !1, producer: "scala-native compiler", isOptimized: false, runtimeVersion: 0, emissionKind: LineTablesOnly, enums: !2)
+        |!1 = !DIFile(filename: "$fileName", directory: "$directory")
+        |!2 = !{}
+        |!3 = !{i32 2, !"Dwarf Version", i32 4}
+        |!4 = !{i32 2, !"Debug Info Version", i32 3}
+        |!5 = !{!"clang version 4.0.1-6 (tags/RELEASE_401/final)"}
+        |!6 = !DISubroutineType(types: !2)
+      """.stripMargin
+  }
+
+  private def diSubprogram(functionDebugInfo: FunctionDebugInfo) =
+    s"""
+      |!${functionDebugInfo.id} = distinct !DISubprogram(name: "${functionDebugInfo.name}", scope: !1, file: !1, line: ${functionDebugInfo.line}, type: !7, isLocal: false, isDefinition: true, scopeLine: 2, isOptimized: false, unit: !0, variables: !2)
+      |!8 = !DILocation(line: 3, column: 5, scope: !${functionDebugInfo.id})
+    """.stripMargin
 }
