@@ -1569,7 +1569,14 @@ trait NirGenExpr { self: NirGenPhase =>
           buf.load(ty, elem)
 
         case Seq(value) =>
-          unsupported(argsp)
+          val argsTypes = genMethodSig(sym).args
+          require(argsTypes.size == 1)
+          val ty   = argsTypes.head
+          val name = genMethodName(sym)
+          val id   = name.id.stripSuffix("_=")
+          val elem = Val.Global(name.top member id, Type.Ptr)
+          val v    = genExpr(value)
+          buf.store(ty, elem, v)
       }
     }
 
